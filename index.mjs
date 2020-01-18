@@ -4,7 +4,7 @@ import consul from 'consul'
 import ssha from './ssha.mjs'
 
 import fs from 'fs'
-var config = JSON.parse(fs.readFileSync('./config.json'))
+let config = JSON.parse(fs.readFileSync('./config.json'))
 
 // @FIXME: Need to check if a DN can contains a /. If yes, we are in trouble with consul.
 // @FIXME: Rewrite with Promises + async 
@@ -28,6 +28,11 @@ const suffix = config.suffix
 const kv_get = key => {
   return new Promise((resolve, reject) =>
     svc_mesh.kv.get(key, (err, getres) => err ? reject(err) : resolve(getres) ));
+}
+
+const kv_set = (key, value) => {
+  return new Promise((resolve, reject) =>
+    svc_mesh.kv.set(key, value, (err, setres) => err ? reject(err) : resolve(setres) ));
 }
 
 /*
@@ -76,12 +81,11 @@ const extract_memberof_from_filter = filter => {
   return res
 }
 
-const fetch_membership = (memberof_to_load, cb) => {
-  let remaining_requests = memberof_to_load.length
+const fetch_membership = async (memberof_to_load, cb) => {
   const error_list = []
   const membership = {}
 
-  memberof_to_load.forEach(m => {
+  await Promise.all(memberof_to_load.map(async m => {
     let parsedM = ""
     try {
         parsedM = ldap.parseDN(m)
@@ -89,22 +93,26 @@ const fetch_membership = (memberof_to_load, cb) => {
         console.warn(`Unable to parse DN ${m}`);
         return;
     }
-    svc_mesh.kv.get(dn_to_consul(parsedM) + "/attribute=member", (err, data) => {
-      if (err) error_list.push(err)
+
+    try {
+      let data = await kv_get(dn_to_consul(parsedM) + "/attribute=member");
+
       // We might search unrelated things
       //else if (!data || !data.Value) error_list.push(m + " not found")
-      else if (!data || !data.Value) console.warn("No entry found for " + m)
-      else if (data.Value) JSON.parse(data.Value).forEach(user => {
-        if (!(user in membership)) membership[user] = []
-        membership[user].push(m)
-      })
-
-      remaining_requests--
-      if (remaining_requests === 0) cb(error_list.length === 0 ? null : error_list, membership)
-    })           
-  })
-  if (memberof_to_load.length === 0)
-    cb(null, [])
+      if (!data || !data.Value) {
+        console.warn("No entry found for " + m)
+      } else if (data.Value) {
+        JSON.parse(data.Value).forEach(user => {
+          if (!(user in membership)) membership[user] = []
+          membership[user].push(m)
+        })
+      }
+    } catch(err) {
+      if (err) error_list.push(err)
+    }
+  }))
+  
+  cb(error_list.length === 0 ? null : error_list, membership)
 }
 
 const decorate_with_memberof = (obj, member_data) => {
@@ -121,9 +129,8 @@ const decorate_with_memberof = (obj, member_data) => {
 
 const add_elements = (dn, attributes_to_add) => Promise.all(
     Object.keys(attributes_to_add)
-          .map(k =>
-            new Promise((resolve, reject) =>
-              svc_mesh.kv.set(dn + "/attribute=" + k, JSON.stringify(attributes_to_add[k]), (err, setres) => err ? reject(err) : resolve(setres)))))
+          .map(k => kv_set(dn + "/attribute=" + k, JSON.stringify(attributes_to_add[k])))
+)
 
 /*
  * Handlers
@@ -136,7 +143,7 @@ const authorize = async (req, res, next) => {
 
   console.log("Check authorization for " + req.connection.ldap.bindDN)
 
-  var key;
+  let key = null;
   try {
     key = await kv_get(dn_to_consul(req.connection.ldap.bindDN) + "/attribute=permissions");
   } catch(err) {
