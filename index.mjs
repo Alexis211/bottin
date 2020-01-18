@@ -193,14 +193,19 @@ server.bind(suffix, async (req, res, next) => {
   }
   const hash = JSON.parse(data.Value).toString()
   const password = req.credentials
-  ssha.checkssha(req.credentials, hash, (err, v) => {
-    if (err) return next(new ldap.OperationsError(err.toString()))
-    if (!v) return next(new ldap.InvalidCredentialsError())
 
-    res.end()
-    console.log("Successful bind for "+req.dn.toString())
-    return next()
-  })
+  let valid;
+  try {
+    valid = await ssha.checkssha(req.credentials, hash);
+  } catch(err) {
+    if (err) return next(new ldap.OperationsError(err.toString()))
+  }
+
+  if (!valid) return next(new ldap.InvalidCredentialsError())
+
+  res.end()
+  console.log("Successful bind for "+req.dn.toString())
+  return next();
 })
 
 server.search(suffix, authorize, async (req, res, next) => {
@@ -289,27 +294,23 @@ const init = async () => {
   const password = Math.random().toString(36).slice(2)
   const admin_dn = ldap.parseDN( "dc=" + username + "," + config.suffix)
 
-  ssha.ssha_pass(password, async (err, hashedPass) => {
-    if (err) {
-      throw err;
-    }
+  let hashedPass = await ssha.ssha_pass(password);
 
-    const admin_attributes = {
-      objectClass: ['simpleSecurityObject', 'organizationalRole'],
-      description: 'LDAP administrator',
-      cn: username,
-      userpassword: hashedPass,
-      structuralObjectClass: 'organizationalRole',
-      permissions: ['read', 'write']
-    }
+  const admin_attributes = {
+    objectClass: ['simpleSecurityObject', 'organizationalRole'],
+    description: 'LDAP administrator',
+    cn: username,
+    userpassword: hashedPass,
+    structuralObjectClass: 'organizationalRole',
+    permissions: ['read', 'write']
+  }
 
-    await add_elements(dn_to_consul(admin_dn), admin_attributes);
-    console.log(
-      "It seems to be a new installation, we created a default user for you: %s with password %s\nWe didn't use true random, you should replace it as soon as possible.",
-      admin_dn.toString(),
-      password
-    )
-  });
+  await add_elements(dn_to_consul(admin_dn), admin_attributes);
+  console.log(
+    "It seems to be a new installation, we created a default user for you: %s with password %s\nWe didn't use true random, you should replace it as soon as possible.",
+    admin_dn.toString(),
+    password
+  )
 }
 
 init().then(() => {
