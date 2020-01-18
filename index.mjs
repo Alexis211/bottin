@@ -25,6 +25,11 @@ const server = ldap.createServer()
 const svc_mesh = consul({host: config.consul})
 const suffix = config.suffix
 
+const kv_get = key => {
+  return new Promise((resolve, reject) =>
+    svc_mesh.kv.get(key, (err, getres) => err ? reject(err) : resolve(getres) ));
+}
+
 /*
  * Data Transform
  */
@@ -123,37 +128,38 @@ const add_elements = (dn, attributes_to_add) => Promise.all(
 /*
  * Handlers
  */
-const authorize = (req, res, next) => {
+const authorize = async (req, res, next) => {
   if (req.connection.ldap.bindDN.equals('')) {
     console.error("Anonymous bind are not authorized")
     return next(new ldap.InsufficientAccessRightsError())
   }
 
   console.log("Check authorization for " + req.connection.ldap.bindDN)
-  const query = new Promise((resolve, reject) =>
-    svc_mesh.kv.get(dn_to_consul(req.connection.ldap.bindDN) + "/attribute=permissions", (err, getres) => err ? reject(err) : resolve(getres)))
 
-  query.then(key => {
-    if (!key || !key.Value) {
-      console.error("There is no attribute=permissions key for " + req.connection.ldap.bindDN)
-      return next(new ldap.InsufficientAccessRightsError())
-    }
-
-    const user_perm = JSON.parse(key.Value)
-    const is_search = (req instanceof ldap.SearchRequest)
-    
-    if (is_search && user_perm.includes("read"))
-      return next()
-
-    if (!is_search && user_perm.includes("write"))
-      return next()
-    
-    console.error(req.dn.toString() + "doesn't have the correct write access")
-    return next(new ldap.InsufficientAccessRightsError())
-  }).catch(err => {
+  var key;
+  try {
+    key = await kv_get(dn_to_consul(req.connection.ldap.bindDN) + "/attribute=permissions");
+  } catch(err) {
     console.error("The Consul database query failed when we tried to fetch " + req.dn.toString() + "'s permissions")
     return next(new ldap.OperationsError(err.toString()))
-  })
+  }
+
+  if (!key || !key.Value) {
+    console.error("There is no attribute=permissions key for " + req.connection.ldap.bindDN)
+    return next(new ldap.InsufficientAccessRightsError())
+  }
+
+  const user_perm = JSON.parse(key.Value)
+  const is_search = (req instanceof ldap.SearchRequest)
+  
+  if (is_search && user_perm.includes("read"))
+    return next()
+
+  if (!is_search && user_perm.includes("write"))
+    return next()
+  
+  console.error(req.dn.toString() + "doesn't have the correct write access")
+  return next(new ldap.InsufficientAccessRightsError())
 }
 
 /*
