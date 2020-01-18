@@ -86,7 +86,7 @@ const fetch_membership = async memberof_to_load => {
   const membership = {}
 
   await Promise.all(memberof_to_load.map(async m => {
-    let parsedM = ""
+    let parsedM;
     try {
         parsedM = ldap.parseDN(m)
     } catch (err) {
@@ -147,7 +147,7 @@ const authorize = async (req, res, next) => {
 
   console.log("Check authorization for " + req.connection.ldap.bindDN)
 
-  let key = null;
+  let key;
   try {
     key = await kv_get(dn_to_consul(req.connection.ldap.bindDN) + "/attribute=permissions");
   } catch(err) {
@@ -179,7 +179,7 @@ const authorize = async (req, res, next) => {
 server.bind(suffix, async (req, res, next) => {
   const user_dn = dn_to_consul(req.dn)
 
-  var data = null;
+  let data;
   try {
     data = await kv_get(user_dn+"/attribute=userpassword");
   } catch(err) {
@@ -206,7 +206,7 @@ server.bind(suffix, async (req, res, next) => {
 server.search(suffix, authorize, async (req, res, next) => {
   const prefix = dn_to_consul(req.dn)
 
-  var data = null;
+  let data;
   try {
     data = await kv_get({key: prefix+"/", recurse: true });
   } catch(err) {
@@ -214,7 +214,7 @@ server.search(suffix, authorize, async (req, res, next) => {
     return next(new ldap.OperationsError(err.toString()))
   }
 
-  var membership = null;
+  let membership;
   try {
     membership = await fetch_membership(extract_memberof_from_filter(req.filter));
   } catch(err) {
@@ -230,87 +230,87 @@ server.search(suffix, authorize, async (req, res, next) => {
   res.end();
 })
 
-server.add(suffix, authorize, (req, res, next) => {
+server.add(suffix, authorize, async (req, res, next) => {
   const consul_dn = dn_to_consul(req.dn)
-  svc_mesh.kv.get({key: consul_dn, recurse: true}, (err, data) => {
-    if (err) return next(new ldap.OperationsError(err.toString()))
-    if (data) return next(new ldap.EntryAlreadyExistsError(req.dn.toString()))
 
-    const attributes_to_add = req.toObject().attributes
-    add_elements(consul_dn, attributes_to_add).then(setres => {
-      res.end()
-      console.log("add - dn=%s - bind=%s", req.dn, req.connection.ldap.bindDN)
-      return next() 
-    }).catch(seterr => {
-      return next(new ldap.OperationsError(seterr.toString()))
-    })
-  })
+  let data = null;
+  try {
+    data = await kv_get({key: consul_dn, recurse: true});
+  } catch(err) {
+    return next(new ldap.OperationsError(err.toString()))
+  }
+
+  if (data) return next(new ldap.EntryAlreadyExistsError(req.dn.toString()));
+
+  const attributes_to_add = req.toObject().attributes;
+
+  let setres = null;
+  try {
+    setres = await add_elements(consul_dn, attributes_to_add);
+  } catch(seterr) {
+    return next(new ldap.OperationsError(seterr.toString()))
+  }
+
+  res.end()
+  console.log("add - dn=%s - bind=%s", req.dn, req.connection.ldap.bindDN)
+  return next();
 })
 
 /*
  * Main
  */
 
-const init = () => new Promise((resolve, reject) => {
-  svc_mesh.kv.get(dn_to_consul(ldap.parseDN(config.suffix)) + "/attribute=dc", (err, data) => {
+const init = async () => {
+  let data = await kv_get(dn_to_consul(ldap.parseDN(config.suffix)) + "/attribute=dc");
+
+  if (data) {
+    return;
+  }
+
+  const base_attributes = {
+    objectClass: ['top', 'dcObject', 'organization'],
+    structuralObjectClass: 'organization'
+  }
+
+  const suffix_dn = ldap.parseDN(config.suffix)
+  const exploded_suffix = explode_dn(suffix_dn)
+  const exploded_last_entry = exploded_suffix[exploded_suffix.length - 1].split('=', 2)
+  if (exploded_last_entry.length != 2) {
+    reject(config.suffix + " is incorrect");
+    return;
+  }
+  const type = exploded_last_entry[0]
+  const value = exploded_last_entry[1] 
+  base_attributes[type] = value
+
+  await add_elements(dn_to_consul(suffix_dn), base_attributes);
+
+  const username = Math.random().toString(36).slice(2)
+  const password = Math.random().toString(36).slice(2)
+  const admin_dn = ldap.parseDN( "dc=" + username + "," + config.suffix)
+
+  ssha.ssha_pass(password, async (err, hashedPass) => {
     if (err) {
-      reject(err);
-      return;
+      throw err;
     }
 
-    if (data) {
-      resolve();
-      return;
+    const admin_attributes = {
+      objectClass: ['simpleSecurityObject', 'organizationalRole'],
+      description: 'LDAP administrator',
+      cn: username,
+      userpassword: hashedPass,
+      structuralObjectClass: 'organizationalRole',
+      permissions: ['read', 'write']
     }
 
-    const base_attributes = {
-      objectClass: ['top', 'dcObject', 'organization'],
-      structuralObjectClass: 'organization'
-    }
-
-    const suffix_dn = ldap.parseDN(config.suffix)
-    const exploded_suffix = explode_dn(suffix_dn)
-    const exploded_last_entry = exploded_suffix[exploded_suffix.length - 1].split('=', 2)
-    if (exploded_last_entry.length != 2) {
-      reject(config.suffix + " is incorrect");
-      return;
-    }
-    const type = exploded_last_entry[0]
-    const value = exploded_last_entry[1] 
-    base_attributes[type] = value
-
-    add_elements(dn_to_consul(suffix_dn), base_attributes).then(() => {
-      const username = Math.random().toString(36).slice(2)
-      const password = Math.random().toString(36).slice(2)
-      const admin_dn = ldap.parseDN( "dc=" + username + "," + config.suffix)
-
-      ssha.ssha_pass(password, (err, hashedPass) => {
-        if (err) {
-          reject(err);
-          return;
-        }
-
-        const admin_attributes = {
-          objectClass: ['simpleSecurityObject', 'organizationalRole'],
-          description: 'LDAP administrator',
-          cn: username,
-          userpassword: hashedPass,
-          structuralObjectClass: 'organizationalRole',
-          permissions: ['read', 'write']
-        }
-
-        add_elements(dn_to_consul(admin_dn), admin_attributes).then(() => {
-          console.log(
-            "It seems to be a new installation, we created a default user for you: %s with password %s\nWe didn't use true random, you should replace it as soon as possible.",
-            admin_dn.toString(),
-            password
-          )
-          resolve();
-        }).catch(err => reject(err))
-      })
-    }).catch(err => reject(err))
-  })
-})
+    await add_elements(dn_to_consul(admin_dn), admin_attributes);
+    console.log(
+      "It seems to be a new installation, we created a default user for you: %s with password %s\nWe didn't use true random, you should replace it as soon as possible.",
+      admin_dn.toString(),
+      password
+    )
+  });
+}
 
 init().then(() => {
   server.listen(
