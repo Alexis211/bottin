@@ -81,7 +81,7 @@ const extract_memberof_from_filter = filter => {
   return res
 }
 
-const fetch_membership = async (memberof_to_load, cb) => {
+const fetch_membership = async memberof_to_load => {
   const error_list = []
   const membership = {}
 
@@ -112,7 +112,11 @@ const fetch_membership = async (memberof_to_load, cb) => {
     }
   }))
   
-  cb(error_list.length === 0 ? null : error_list, membership)
+  if (error_list.length === 0) {
+    return membership;
+  } else {
+    throw error_list;
+  }
 }
 
 const decorate_with_memberof = (obj, member_data) => {
@@ -172,52 +176,58 @@ const authorize = async (req, res, next) => {
 /*
  * Routes
  */
-server.bind(suffix, (req, res, next) => {
+server.bind(suffix, async (req, res, next) => {
   const user_dn = dn_to_consul(req.dn)
-  svc_mesh.kv.get(user_dn+"/attribute=userpassword", (err, data) => {
-    if (err) {
-      console.error("Failed bind for " + req.dn.toString(), err)
-      return next(new ldap.OperationsError(err.toString()))
-    }
-    if (data === undefined || data === null) {
-      console.error("Failed bind for " + req.dn.toString(), "No entry in consul")
-      return next(new ldap.NoSuchObjectError(user_dn))
-    }
-    const hash = JSON.parse(data.Value).toString()
-    const password = req.credentials
-    ssha.checkssha(req.credentials, hash, (err, v) => {
-      if (err) return next(new ldap.OperationsError(err.toString()))
-      if (!v) return next(new ldap.InvalidCredentialsError())
-    
-      res.end()
-      console.log("Successful bind for "+req.dn.toString())
-      return next()
-    })
+
+  var data = null;
+  try {
+    data = await kv_get(user_dn+"/attribute=userpassword");
+  } catch(err) {
+    console.error("Failed bind for " + req.dn.toString(), err)
+    return next(new ldap.OperationsError(err.toString()))
+  }
+
+  if (data === undefined || data === null) {
+    console.error("Failed bind for " + req.dn.toString(), "No entry in consul")
+    return next(new ldap.NoSuchObjectError(user_dn))
+  }
+  const hash = JSON.parse(data.Value).toString()
+  const password = req.credentials
+  ssha.checkssha(req.credentials, hash, (err, v) => {
+    if (err) return next(new ldap.OperationsError(err.toString()))
+    if (!v) return next(new ldap.InvalidCredentialsError())
+
+    res.end()
+    console.log("Successful bind for "+req.dn.toString())
+    return next()
   })
 })
 
-server.search(suffix, authorize, (req, res, next) => {
+server.search(suffix, authorize, async (req, res, next) => {
   const prefix = dn_to_consul(req.dn)
-  svc_mesh.kv.get({key: prefix+"/", recurse: true }, (err, data) => {
-    if (err) {
-      console.error("Failed to search in "+req.dn.toString(), err)
-      return next(new ldap.OperationsError(err.toString()))
-    }
 
-    fetch_membership(extract_memberof_from_filter(req.filter), (err, membership) => {
-      if (err) {
-	console.error("Failed to fetch memberof in "+req.dn.toString() + " for " + req.filter.toString(), err)
-        return next(new ldap.OperationsError(err.toString()))
-      }
+  var data = null;
+  try {
+    data = await kv_get({key: prefix+"/", recurse: true });
+  } catch(err) {
+    console.error("Failed to search in "+req.dn.toString(), err)
+    return next(new ldap.OperationsError(err.toString()))
+  }
 
-      parse_consul_res(data)
-        .filter(o => req.filter.matches(decorate_with_memberof(o, membership).attributes))
-        .forEach(o => res.send(o))
-  
-      console.log("search - dn=%s - filter=%s - bind=%s", req.dn, req.filter, req.connection.ldap.bindDN)
-      res.end();
-    })
-  })
+  var membership = null;
+  try {
+    membership = await fetch_membership(extract_memberof_from_filter(req.filter));
+  } catch(err) {
+    console.error("Failed to fetch memberof in "+req.dn.toString() + " for " + req.filter.toString(), err)
+    return next(new ldap.OperationsError(err.toString()))
+  }
+
+  parse_consul_res(data)
+    .filter(o => req.filter.matches(decorate_with_memberof(o, membership).attributes))
+    .forEach(o => res.send(o))
+
+  console.log("search - dn=%s - filter=%s - bind=%s", req.dn, req.filter, req.connection.ldap.bindDN)
+  res.end();
 })
 
 server.add(suffix, authorize, (req, res, next) => {
