@@ -2,7 +2,9 @@
 import ldap from 'ldapjs'
 import consul from 'consul'
 import ssha from './ssha.mjs'
-import config from './config.json'
+
+import fs from 'fs'
+var config = JSON.parse(fs.readFileSync('./config.json'))
 
 // @FIXME: Need to check if a DN can contains a /. If yes, we are in trouble with consul.
 // @FIXME: Rewrite with Promises + async 
@@ -112,11 +114,11 @@ const decorate_with_memberof = (obj, member_data) => {
  * Object abstraction
  */
 
-const add_elements = (dn, attributes_to_add, internal_type="attribute") => Promise.all(
+const add_elements = (dn, attributes_to_add) => Promise.all(
     Object.keys(attributes_to_add)
           .map(k =>
             new Promise((resolve, reject) =>
-              svc_mesh.kv.set(dn + "/" + internal_type + "=" + k, JSON.stringify(attributes_to_add[k]), (err, setres) => err ? reject(err) : resolve(setres)))))
+              svc_mesh.kv.set(dn + "/attribute=" + k, JSON.stringify(attributes_to_add[k]), (err, setres) => err ? reject(err) : resolve(setres)))))
 
 /*
  * Handlers
@@ -129,11 +131,11 @@ const authorize = (req, res, next) => {
 
   console.log("Check authorization for " + req.connection.ldap.bindDN)
   const query = new Promise((resolve, reject) =>
-    svc_mesh.kv.get(dn_to_consul(req.connection.ldap.bindDN) + "/internal=permission", (err, getres) => err ? reject(err) : resolve(getres)))
+    svc_mesh.kv.get(dn_to_consul(req.connection.ldap.bindDN) + "/attribute=permissions", (err, getres) => err ? reject(err) : resolve(getres)))
 
   query.then(key => {
     if (!key || !key.Value) {
-      console.error("There is no internal=permission key for " + req.connection.ldap.bindDN)
+      console.error("There is no attribute=permissions key for " + req.connection.ldap.bindDN)
       return next(new ldap.InsufficientAccessRightsError())
     }
 
