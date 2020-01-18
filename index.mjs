@@ -94,21 +94,23 @@ const fetch_membership = async memberof_to_load => {
         return;
     }
 
+    let data;
     try {
-      let data = await kv_get(dn_to_consul(parsedM) + "/attribute=member");
-
-      // We might search unrelated things
-      //else if (!data || !data.Value) error_list.push(m + " not found")
-      if (!data || !data.Value) {
-        console.warn("No entry found for " + m)
-      } else if (data.Value) {
-        JSON.parse(data.Value).forEach(user => {
-          if (!(user in membership)) membership[user] = []
-          membership[user].push(m)
-        })
-      }
+      data = await kv_get(dn_to_consul(parsedM) + "/attribute=member");
     } catch(err) {
-      if (err) error_list.push(err)
+      error_list.push(err)
+      return;
+    }
+
+    // We might search unrelated things
+    //else if (!data || !data.Value) error_list.push(m + " not found")
+    if (!data || !data.Value) {
+      console.warn("No entry found for " + m)
+    } else if (data.Value) {
+      JSON.parse(data.Value).forEach(user => {
+        if (!(user in membership)) membership[user] = []
+        membership[user].push(m)
+      })
     }
   }))
   
@@ -194,14 +196,12 @@ server.bind(suffix, async (req, res, next) => {
   const hash = JSON.parse(data.Value).toString()
   const password = req.credentials
 
-  let valid;
   try {
-    valid = await ssha.checkssha(req.credentials, hash);
+    let valid = await ssha.checkssha(req.credentials, hash);
+    if (!valid) return next(new ldap.InvalidCredentialsError());
   } catch(err) {
-    if (err) return next(new ldap.OperationsError(err.toString()))
+    return next(new ldap.OperationsError(err.toString()))
   }
-
-  if (!valid) return next(new ldap.InvalidCredentialsError())
 
   res.end()
   console.log("Successful bind for "+req.dn.toString())
